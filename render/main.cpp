@@ -5,7 +5,10 @@
 
 #include "refRenderer.h"
 #include "cudaRenderer.h"
+
+#ifndef NO_OPENGL
 #include "platformgl.h"
+#endif
 
 #define DEFAULT_IMAGE_SIZE 1024
 
@@ -25,7 +28,9 @@ void usage(const char* progname) {
     printf("  -s  --size  <INT>             Rendered image size: <INT>x<INT> pixels (default=%d)\n", DEFAULT_IMAGE_SIZE);    
     printf("  -b  --bench <START:END>       Run for frames [START,END) (default=[0,1))\n");
     printf("  -c  --check                   Check correctness of CUDA output against CPU reference\n");
+#ifndef NO_OPENGL
     printf("  -i  --interactive             Render output to interactive display\n");
+#endif
     printf("  -f  --file  <FILENAME>        Output file name (FILENAME_xxxx.ppm) (default=output)\n");
     printf("  -?  --help                    This message\n");
 }
@@ -51,14 +56,22 @@ int main(int argc, char** argv)
         {"help",        0, 0,  '?'},
         {"check",       0, 0,  'c'},
         {"bench",       1, 0,  'b'},
-	{"interactive", 0, 0,  'i'},
+#ifndef NO_OPENGL
+        {"interactive", 0, 0,  'i'},
+#endif
         {"file",        1, 0,  'f'},
         {"renderer",    1, 0,  'r'},
         {"size",        1, 0,  's'},
         {0 ,0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "b:f:r:s:ci?", long_options, NULL)) != EOF) {
+#ifndef NO_OPENGL
+    const char* optstring = "b:f:r:s:ci?";
+#else
+    const char* optstring = "b:f:r:s:c?";
+#endif
+
+    while ((opt = getopt_long(argc, argv, optstring, long_options, NULL)) != EOF) {
 
         switch (opt) {
         case 'b':
@@ -68,9 +81,11 @@ int main(int argc, char** argv)
                 exit(1);
             }
             break;
-	case 'i':
-   	    interactiveMode = true;
-	    break;
+#ifndef NO_OPENGL
+        case 'i':
+            interactiveMode = true;
+            break;
+#endif
         case 'c':
             checkCorrectness = true;
             break;
@@ -81,12 +96,12 @@ int main(int argc, char** argv)
             if (std::string(optarg).compare("cuda") == 0) {
                 useRefRenderer = false;
             } else if (std::string(optarg).compare("cpuref") == 0) {
-	      useRefRenderer = true;
-	    } else {
-	      fprintf(stderr, "ERROR: Unknown renderer type: %s\n", optarg);
-	      usage(argv[0]);
-	      return 1;
-	    }
+              useRefRenderer = true;
+            } else {
+              fprintf(stderr, "ERROR: Unknown renderer type: %s\n", optarg);
+              usage(argv[0]);
+              return 1;
+            }
             break;
         case 's':
             imageSize = atoi(optarg);
@@ -148,7 +163,6 @@ int main(int argc, char** argv)
 
     if (checkCorrectness) {
         // Need both the renderers
-
         CircleRenderer* ref_renderer;
         CircleRenderer* cuda_renderer;
 
@@ -166,7 +180,6 @@ int main(int argc, char** argv)
         CheckBenchmark(ref_renderer, cuda_renderer, 0, 1, frameFilename);
     }
     else {
-
         if (useRefRenderer)
             renderer = new RefRenderer();
         else
@@ -176,12 +189,17 @@ int main(int argc, char** argv)
         renderer->loadScene(sceneName);
         renderer->setup();
 
+#ifdef NO_OPENGL
+        // In headless mode, always run benchmark mode
+        startBenchmark(renderer, benchmarkFrameStart, benchmarkFrameEnd - benchmarkFrameStart, frameFilename);
+#else
         if (!interactiveMode)
             startBenchmark(renderer, benchmarkFrameStart, benchmarkFrameEnd - benchmarkFrameStart, frameFilename);
         else {
             glutInit(&argc, argv);
             startRendererWithDisplay(renderer);
         }
+#endif
     }
 
     return 0;

@@ -12,7 +12,24 @@
 
 #include "CycleTimer.h"
 
-#define THREADS_PER_BLOCK 256
+#define THREADS_PER_BLOCK 512
+
+#define DEBUG
+
+#ifdef DEBUG
+#define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
+inline void cudaAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess)
+   {
+      fprintf(stderr, "CUDA Error: %s at %s:%d\n",
+        cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+#else
+#define cudaCheckError(ans) ans
+#endif
 
 
 // helper function to round an integer up to the next power of 2
@@ -25,6 +42,28 @@ static inline int nextPow2(int n) {
     n |= n >> 16;
     n++;
     return n;
+}
+
+
+__global__ void firstParallel(int N, int* result, int two_d, int two_dplus1, int rounded_length){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  
+    int i = idx * two_dplus1;   
+
+    if ((i+two_dplus1-1) < rounded_length)
+        result[i+two_dplus1-1] += result[i+two_d-1];
+}
+
+
+
+__global__ void secondParallel(int N, int* result, int two_d, int two_dplus1, int rounded_length){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  
+    int i = idx * two_dplus1;
+
+    if ((i+two_dplus1-1) < rounded_length){
+        int t = result[i+two_d-1];
+        result[i+two_d-1] = result[i+two_dplus1-1];
+        result[i+two_dplus1-1] += t;
+    }
 }
 
 // exclusive_scan --
@@ -44,17 +83,40 @@ static inline int nextPow2(int n) {
 // places it in result
 void exclusive_scan(int* input, int N, int* result)
 {
+    int rounded_length = nextPow2(N);
+    // set the rest of elements to zero so don't affect the output
+    cudaCheckError(cudaMemset(&result[N], 0, sizeof(float) * (rounded_length - N))); 
 
-    // CS149 TODO:
-    //
-    // Implement your exclusive scan implementation here.  Keep in
-    // mind that although the arguments to this function are device
-    // allocated arrays, this is a function that is running in a thread
-    // on the CPU.  Your implementation will need to make multiple calls
-    // to CUDA kernel functions (that you must write) to implement the
-    // scan.
+    // if the rounded len < THREADS_PER_BLOCK then that will be the 
+    // number of threads created
+    const int threadsPerBlock = min(rounded_length, THREADS_PER_BLOCK);
 
+    // upsweep phase
+    for (int two_d = 1; two_d <= rounded_length/2; two_d*=2) {
+        int two_dplus1 = 2*two_d;
 
+        // Calculate grid dimensions
+        int numThreads = (rounded_length + two_dplus1 - 1)/ two_dplus1;
+        int blocks = (numThreads + threadsPerBlock - 1) / threadsPerBlock;
+
+        firstParallel<<<blocks, min(threadsPerBlock, numThreads)>>>(N, result, two_d, two_dplus1, rounded_length);
+        cudaCheckError(cudaDeviceSynchronize());
+    }
+
+    // Set the last element to 0 (using rounded_length)
+    cudaCheckError(cudaMemset(&result[rounded_length - 1], 0, sizeof(int)));
+
+    // downsweep phase
+    for (int two_d = rounded_length/2; two_d >= 1; two_d /= 2) {
+        int two_dplus1 = 2*two_d;
+        
+        // Calculate grid dimensions
+        int numThreads = (rounded_length + two_dplus1 - 1)/ two_dplus1;
+        int blocks = (numThreads + threadsPerBlock - 1) / threadsPerBlock;
+        
+        secondParallel<<<blocks, min(threadsPerBlock, numThreads)>>>(N, result, two_d, two_dplus1, rounded_length);
+        cudaCheckError(cudaDeviceSynchronize());
+    }
 }
 
 
@@ -82,27 +144,27 @@ double cudaScan(int* inarray, int* end, int* resultarray)
 
     int rounded_length = nextPow2(end - inarray);
     
-    cudaMalloc((void **)&device_result, sizeof(int) * rounded_length);
-    cudaMalloc((void **)&device_input, sizeof(int) * rounded_length);
+    cudaCheckError(cudaMalloc((void **)&device_result, sizeof(int) * rounded_length));
+    cudaCheckError(cudaMalloc((void **)&device_input, sizeof(int) * rounded_length));
 
     // For convenience, both the input and output vectors on the
     // device are initialized to the input values. This means that
     // students are free to implement an in-place scan on the result
     // vector if desired.  If you do this, you will need to keep this
     // in mind when calling exclusive_scan from find_repeats.
-    cudaMemcpy(device_input, inarray, (end - inarray) * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(device_result, inarray, (end - inarray) * sizeof(int), cudaMemcpyHostToDevice);
+    cudaCheckError(cudaMemcpy(device_input, inarray, (end - inarray) * sizeof(int), cudaMemcpyHostToDevice));
+    cudaCheckError(cudaMemcpy(device_result, inarray, (end - inarray) * sizeof(int), cudaMemcpyHostToDevice));
 
     double startTime = CycleTimer::currentSeconds();
 
     exclusive_scan(device_input, N, device_result);
 
     // Wait for completion
-    cudaDeviceSynchronize();
+    cudaCheckError(cudaDeviceSynchronize());
     double endTime = CycleTimer::currentSeconds();
        
-    cudaMemcpy(resultarray, device_result, (end - inarray) * sizeof(int), cudaMemcpyDeviceToHost);
-
+    cudaCheckError(cudaMemcpy(resultarray, device_result, (end - inarray) * sizeof(int), cudaMemcpyDeviceToHost));
+    
     double overallDuration = endTime - startTime;
     return overallDuration; 
 }
@@ -140,6 +202,29 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration; 
 }
 
+__global__ void setFlagArr(int* input, int N, int* flag, int* exc){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  
+
+    // we will also init the array here to prevent resource wastage
+    if (idx == N - 1 || input[idx] == input[idx + 1])
+        flag[idx] = exc[idx] = 1;
+    else
+        flag[idx] = exc[idx] = 0;
+}
+
+
+__global__ void setOutArr(int* output, int N, int* flag, int* exc, int* size){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  
+
+    if (idx < N - 1 && flag[idx] == 1){
+        output[exc[idx]] = idx;
+    }
+
+    if (idx == (N - 1)) {
+        *size = exc[idx];
+    }
+}
+
 
 // find_repeats --
 //
@@ -161,7 +246,39 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // must ensure that the results of find_repeats are correct given
     // the actual array length.
 
-    return 0; 
+    int rounded_length = nextPow2(length);
+    int N = length;
+
+    int* d_flag; 
+    int* d_exc;
+    int size; 
+    int* d_size;
+
+    cudaCheckError(cudaMalloc((void**)&d_flag, sizeof(int) * rounded_length));
+    cudaCheckError(cudaMalloc((void**)&d_exc, sizeof(int) * rounded_length));
+    cudaCheckError(cudaMalloc((void**)&d_size, sizeof(int)));
+
+    cudaCheckError(cudaMemset(d_size, 0, sizeof(int)));
+    
+    int threadsPerBlock = min(length, THREADS_PER_BLOCK);
+    int blocks = (length + threadsPerBlock - 1) / threadsPerBlock;
+
+    setFlagArr<<<blocks, threadsPerBlock>>>(device_input, N, d_flag, d_exc);
+    cudaCheckError(cudaDeviceSynchronize());
+
+    exclusive_scan(d_exc, length, d_exc);
+    cudaCheckError(cudaDeviceSynchronize());
+
+    setOutArr<<<blocks, threadsPerBlock>>>(device_output, N, d_flag, d_exc, d_size);
+    cudaCheckError(cudaDeviceSynchronize());
+
+    cudaCheckError(cudaMemcpy(&size, d_size, sizeof(int), cudaMemcpyDeviceToHost));
+
+    cudaCheckError(cudaFree(d_flag));
+    cudaCheckError(cudaFree(d_exc));
+    cudaCheckError(cudaFree(d_size));
+
+    return size; 
 }
 
 

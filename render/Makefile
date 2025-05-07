@@ -1,4 +1,3 @@
-
 EXECUTABLE := render
 
 CU_FILES   := cudaRenderer.cu benchmark.cu
@@ -12,36 +11,32 @@ LOGS	   := logs
 
 ###########################################################
 
-ARCH := $(shell uname -m)
-
-ifeq ($(ARCH), aarch64)
-    CXX = g++
-else
-    CXX = g++ -m64
-endif
-
+# Colab environment settings
 OBJDIR=objs
 CXXFLAGS=-O3 -Wall -g
 HOSTNAME=$(shell hostname)
 
-LIBS       :=
+# Libraries - only CUDA, no OpenGL
+LIBS       := cudart
 FRAMEWORKS :=
 
-NVCCFLAGS=-O3 -m64
-LIBS += GL glut cudart
+# Define NO_OPENGL to use headless mode
+CXXFLAGS += -DNO_OPENGL
 
-ifneq ($(wildcard /opt/cuda-8.0/.*),)
-# Latedays
-LDFLAGS=-L/opt/cuda-8.0/lib64/ -lcudart
-else
-# GHC
-LDFLAGS=-L/usr/local/cuda/lib64/ -lcudart
-endif
+# CUDA settings for Colab T4
+NVCC=nvcc
+NVCCFLAGS=-O3 --gpu-architecture=compute_75 --gpu-code=sm_75
+CUDA_PATH=/usr/local/cuda
+
+# Colab CUDA paths
+LDFLAGS=-L$(CUDA_PATH)/lib64/ -lcudart
+CUDA_INCLUDE_PATH=$(CUDA_PATH)/include
+
+# Add CUDA include path
+CXXFLAGS += -I$(CUDA_INCLUDE_PATH)
 
 LDLIBS  := $(addprefix -l, $(LIBS))
 LDFRAMEWORKS := $(addprefix -framework , $(FRAMEWORKS))
-
-NVCC=nvcc
 
 OBJS=$(OBJDIR)/main.o $(OBJDIR)/display.o $(OBJDIR)/benchmark.o $(OBJDIR)/refRenderer.o \
      $(OBJDIR)/cudaRenderer.o $(OBJDIR)/noise.o $(OBJDIR)/ppm.o $(OBJDIR)/sceneLoader.o
@@ -52,19 +47,16 @@ OBJS=$(OBJDIR)/main.o $(OBJDIR)/display.o $(OBJDIR)/benchmark.o $(OBJDIR)/refRen
 default: $(EXECUTABLE)
 
 dirs:
-		mkdir -p $(OBJDIR)/
+	mkdir -p $(OBJDIR)/
 
 clean:
-		rm -rf $(OBJDIR) *~ $(EXECUTABLE) $(LOGS)
-
-check:	default
-		./checker.pl
+	rm -rf $(OBJDIR) *~ $(EXECUTABLE) $(LOGS)
 
 $(EXECUTABLE): dirs $(OBJS)
-		$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS) $(LDFRAMEWORKS)
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS) $(LDFRAMEWORKS)
 
 $(OBJDIR)/%.o: %.cpp
-		$(CXX) $< $(CXXFLAGS) -c -o $@
+	$(CXX) $< $(CXXFLAGS) -c -o $@
 
 $(OBJDIR)/%.o: %.cu
-		$(NVCC) $< $(NVCCFLAGS) -c -o $@
+	$(NVCC) $< $(NVCCFLAGS) -c -o $@

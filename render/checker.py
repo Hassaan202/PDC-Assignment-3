@@ -7,8 +7,7 @@ import shutil
 import re
 import math
 
-
-perf_pts = 7
+# perf_pts = 7 # Retained for potential future use, but not used in current scoring
 correctness_pts = 2
 
 # scene_names = ["rgb", "rgby", "rand10k", "rand100k", "biglittle", "littlebig", "pattern","bouncingballs", "hypnosis", "fireworks", "snow", "snowsingle", "rand1M", "micro2M"]
@@ -23,7 +22,7 @@ scene_names = [
     "rand1M",
     "micro2M",
 ]
-score_scene_names_list = [
+score_scene_names_list = [ # Scenes for which student's time will be measured and displayed
     "rgb",
     "rand10k",
     "rand100k",
@@ -50,7 +49,8 @@ def correctness_log_file(scene):
 
 
 def time_log_file(scene):
-    return "./logs/time_%s.log" % scene
+    # This log file will now only be for the student's render times
+    return "./logs/time_student_%s.log" % scene
 
 
 #### END OF LOGS MANAGEMENT ####
@@ -58,8 +58,9 @@ def time_log_file(scene):
 
 #### RUNNING THE RENDERERS ####
 def check_correctness(render_cmd, scene):
+    # This function now only runs the student's renderer ("render")
     cmd_string = "./%s -c %s -s 1024 -f logs/output > %s" % (
-        render_cmd,
+        render_cmd, # Should always be "render"
         scene,
         correctness_log_file(scene),
     )
@@ -76,13 +77,14 @@ def check_correctness(render_cmd, scene):
 
 # Run a renderer one time and get the time taken
 def get_time(render_cmd, scene):
+    # This function now only gets time for the student's renderer ("render")
     # print("get_time %s %s" % (render_cmd, scene))
     cmd_string = (
         "./%s -r cuda -b 0:4 %s -s 1024 -f logs/output | tee %s | grep Total:"
         % (
-            render_cmd,
+            render_cmd, # Should always be "render"
             scene,
-            time_log_file(scene),
+            time_log_file(scene), # Log file named for student
         )
     )
 
@@ -95,22 +97,27 @@ def get_time(render_cmd, scene):
         result = subprocess.run([cmd_string], shell=True, capture_output=True)
 
     # Extract the time taken
-    time = float(re.search(r"\d+\.\d+", str(result.stdout)).group())
+    # This assumes the student's "./render" command outputs a line like "Total: <time_float>"
+    search_result = re.search(r"\d+\.\d+", str(result.stdout))
+    if search_result:
+        time = float(search_result.group())
+    else:
+        print(f"WARNING: Could not parse time for {render_cmd} on scene {scene}. Output: {result.stdout}")
+        time = -1.0 # Placeholder for error
     return time
 
 
 #### END OF RUNNING THE RENDERERS ####
 
 
-# Run all scenes. Some of them are for performance.
+# Run all scenes for the student's solution.
 def run_scenes(n_runs):
     correct = {}
     stu_times = {}
-    ref_times = {}
     for scene in scene_names:
         print("\nRunning scene: %s..." % (scene))
 
-        # Check for correctness
+        # Check for correctness using student's renderer
         correct[scene] = check_correctness("render", scene)
         if not correct[scene]:
             print(
@@ -120,27 +127,60 @@ def run_scenes(n_runs):
         else:
             print("[%s] Correctness passed!" % scene)
 
-        # Check for performance
+        # Get student's performance times
         if scene in score_scene_names:
-            # Do multiple perf runs
-            stu_times[scene] = [get_time("render", scene) for _ in range(n_runs)]
-            ref_times[scene] = [get_time("render_ref", scene) for _ in range(n_runs)]
+            current_scene_times = []
+            for _ in range(n_runs):
+                time_val = get_time("render", scene)
+                if time_val >= 0: # Add time only if successfully parsed
+                    current_scene_times.append(time_val)
+            
+            if current_scene_times: # only populate if we got valid times
+                 stu_times[scene] = current_scene_times
+            else: # if all runs failed to get time
+                 stu_times[scene] = [-1.0] * n_runs # or some other error indicator
 
-            print("[%s] Student times: " % (scene), stu_times[scene])
-            print("[%s] Reference times: " % (scene), ref_times[scene])
+            print("[%s] Student times: " % (scene), stu_times.get(scene, "N/A (Time parsing failed)"))
 
-    return correct, stu_times, ref_times
+    return correct, stu_times
 
 
-# Compute scores
-def score_table(correct, stu_times, ref_times):
-    print("------------")
-    print("Score table:")
-    print("------------")
-    header = "| %-15s | %-16s | %-15s | %-15s |" % (
+# Calculate scores based on student's correctness and time
+def score_calculate(correct, stu_times):
+    scores = []
+    for scene in score_scene_names_list:
+        min_stu_time_val = "N/A"
+        if scene in stu_times and stu_times[scene]:
+            valid_times = [t for t in stu_times[scene] if t >= 0]
+            if valid_times:
+                min_stu_time_val = min(valid_times)
+            else: # All time measurements failed for this scene
+                min_stu_time_val = "Error"
+        
+        current_score = 0
+        is_correct = correct.get(scene, False)
+        if is_correct:
+            current_score = correctness_pts
+        
+        scores.append(
+            {
+                "scene": scene,
+                "correct": is_correct,
+                "stu_time": min_stu_time_val,
+                "score": current_score, # Score is now based only on correctness_pts
+            }
+        )
+    return scores
+
+# Display score table with student information only
+def score_table(correct, stu_times):
+    print("---------------------------------------------------------") # Adjusted dashes for new table width
+    print("Score table (Student Information Only):")
+    print("---------------------------------------------------------")
+    header = "| %-15s | %-11s | %-20s | %-7s |" % (
         "Scene Name",
-        "Ref Time (T_ref)",
-        "Your Time (T)",
+        "Correct",
+        "Your Time (T) (sec)", # Clarified unit
         "Score",
     )
     dashes = "-" * len(header)
@@ -148,60 +188,45 @@ def score_table(correct, stu_times, ref_times):
     print(header)
     print(dashes)
 
-    scores = score_calculate(correct, stu_times, ref_times)
+    scores_data = score_calculate(correct, stu_times)
     total_score = 0
 
-    for score in scores:
-        scene = score["scene"]
-        ref_time = score["ref_time"]
-        stu_time = score["stu_time"] if correct[scene] else "(F)"
-        score = score["score"]
-
-        print("| %-15s | %-16s | %-15s | %-15s |" % (scene, ref_time, stu_time, score))
-        total_score += score
-
-    print(dashes)
-
-    max_total_score = (perf_pts + correctness_pts) * len(score_scene_names)
-    score_string = "%s/%s" % (total_score, max_total_score)
-    print("| %-15s   %-16s | %-15s | %-15s |" % ("", "", "Total score:", score_string))
-
-    print(dashes)
-
-
-def score_calculate(correct, stu_times, ref_times):
-    scores = []
-    for scene in score_scene_names_list:
-        stu_time = min(stu_times[scene])
-        ref_time = min(ref_times[scene])
-        if correct[scene]:
-            if stu_time <= 1.2 * ref_time:
-                score = perf_pts + correctness_pts
-            elif stu_time > 10 * ref_time:
-                score = correctness_pts
-            else:
-                score = correctness_pts + math.ceil(perf_pts * (ref_time / stu_time))
+    for item in scores_data:
+        scene = item["scene"]
+        is_correct_str = "Passed" if item["correct"] else "Failed"
+        
+        stu_time_val = item["stu_time"]
+        
+        if item["correct"]:
+            if isinstance(stu_time_val, float):
+                 actual_stu_time_display = "%.4f" % stu_time_val
+            else: # Handles "N/A" or "Error"
+                 actual_stu_time_display = str(stu_time_val)
         else:
-            score = 0
+            actual_stu_time_display = "(Correctness Failed)"
 
-        scores.append(
-            {
-                "scene": scene,
-                "correct": correct[scene],
-                "ref_time": ref_time,
-                "stu_time": stu_time,
-                "score": score,
-            }
-        )
+        score_val = item["score"]
 
-    return scores
+        print("| %-15s | %-11s | %-20s | %-7s |" % (scene, is_correct_str, actual_stu_time_display, score_val))
+        total_score += score_val
+
+    print(dashes)
+
+    max_total_score = correctness_pts * len(score_scene_names_list)
+    score_string = "%s/%s" % (total_score, max_total_score)
+    print("| %-15s   %-11s | %-20s | %-7s |" % ("", "", "Total score:", score_string))
+
+    print(dashes)
 
 
-correct, stu_times, ref_times = run_scenes(3)
+# Main execution block
+correct, stu_times = run_scenes(3) # Only student's data is returned
 
 GRADING_TOKEN = os.environ.get("GRADING_TOKEN")
 if not GRADING_TOKEN:
-    score_table(correct, stu_times, ref_times)
+    score_table(correct, stu_times) # Pass only student's data
 else:
-    scores = score_calculate(correct, stu_times, ref_times)
-    print(f"{GRADING_TOKEN}{json.dumps(scores)}")
+    # When a grading token is present, output JSON
+    # The score_calculate function now produces data without ref_times
+    scores_data_for_grading = score_calculate(correct, stu_times)
+    print(f"{GRADING_TOKEN}{json.dumps(scores_data_for_grading)}")

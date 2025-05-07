@@ -312,6 +312,73 @@ __global__ void kernelAdvanceSnowflake() {
     *((float3*)velocityPtr) = velocity;
 }
 
+
+
+// circleInBoxConservative --
+//
+// Tests whether circle with center (circleX, circleY) and radius
+// `circleRadius` *may intersect* the box defined by coordinates for
+// it's left and right sides, and top and bottom edges.  For
+// efficiency, this is a conservative test.  If it returns 0, then the
+// circle definitely does not intersect the box.  However a result of
+// 1 does not imply an intersection actually exists.  Further tests
+// are needed to determine if an intersection actually exists.  For
+// example, you could continue with actual point in circle tests, or
+// make a subsequent call to circleInBox().
+// Note: For a valid Box, you will want to use boxR >= boxL and 
+// boxT >= boxB. 
+__device__ __inline__ int
+circleInBoxConservative(
+    float circleX, float circleY, float circleRadius,
+    float boxL, float boxR, float boxT, float boxB)
+{
+
+    // expand box by circle radius.  Test if circle center is in the
+    // expanded box.
+
+    if ( circleX >= (boxL - circleRadius) &&
+         circleX <= (boxR + circleRadius) &&
+         circleY >= (boxB - circleRadius) &&
+         circleY <= (boxT + circleRadius) ) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+
+// circleInBox --
+//
+// This is a true circle in box test.  It is more expensive than the
+// function circleInBoxConservative above, but it's 1/0 result is a
+// definitive result.
+// Note: For a valid Box, you will want to use boxR >= boxL and 
+// boxT >= boxB. 
+__device__ __inline__ int
+circleInBox(
+    float circleX, float circleY, float circleRadius,
+    float boxL, float boxR, float boxT, float boxB)
+{
+
+    // clamp circle center to box (finds the closest point on the box)
+    float closestX = (circleX > boxL) ? ((circleX < boxR) ? circleX : boxR) : boxL;
+    float closestY = (circleY > boxB) ? ((circleY < boxT) ? circleY : boxT) : boxB;
+
+    // is circle radius less than the distance to the closest point on
+    // the box?
+    float distX = closestX - circleX;
+    float distY = closestY - circleY;
+
+    if ( ((distX*distX) + (distY*distY)) <= (circleRadius*circleRadius) ) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+
+
+
 // shadePixel -- (CUDA device code)
 //
 // given a pixel and a circle, determines the contribution to the
@@ -423,6 +490,93 @@ __global__ void kernelRenderCircles() {
                                                  invHeight * (static_cast<float>(pixelY) + 0.5f));
             shadePixel(index, pixelCenterNorm, p, imgPtr);
             imgPtr++;
+        }
+    }
+}
+
+
+// This kernel is called for each pixel
+__global__ void kernelRenderPixels() {
+    // Calculate pixel coordinates from thread ID
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    // Bounds check
+    if (pixelX >= cuConstRendererParams.imageWidth || pixelY >= cuConstRendererParams.imageHeight)
+        return;
+    
+    // The output pixel in image
+    int pixelIndex = 4 * (pixelY * cuConstRendererParams.imageWidth + pixelX);
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[pixelIndex]);
+    
+    // Normalized pixel center coordinates
+    float invWidth = 1.f / cuConstRendererParams.imageWidth;
+    float invHeight = 1.f / cuConstRendererParams.imageHeight;
+    float2 pixelCenterNorm = make_float2(
+        invWidth * (static_cast<float>(pixelX) + 0.5f),
+        invHeight * (static_cast<float>(pixelY) + 0.5f));
+    
+    // Process all circles in order
+    for (int circleIndex = 0; circleIndex < cuConstRendererParams.numCircles; circleIndex++) {
+        int index3 = 3 * circleIndex;
+        
+        // Read position and radius
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        float rad = cuConstRendererParams.radius[circleIndex];
+
+        float pixelBoxL = pixelCenterNorm.x - invWidth/2;
+        float pixelBoxR = pixelCenterNorm.x + invWidth/2;
+        float pixelBoxT = pixelCenterNorm.y + invHeight/2;
+        float pixelBoxB = pixelCenterNorm.y - invHeight/2;
+        
+        // Check if circle can possibly affect this pixel using the conservative test
+        if (!circleInBoxConservative(p.x, p.y, rad, pixelBoxL, pixelBoxR, pixelBoxT, pixelBoxB))
+            continue;
+
+        // If circle contributes to the pixel, shade it
+        if (circleInBox(p.x, p.y, rad, pixelBoxL, pixelBoxR, pixelBoxT, pixelBoxB)) {
+            // Calculate shading 
+            float3 rgb;
+            float alpha;
+
+            float diffX = p.x - pixelCenterNorm.x;
+            float diffY = p.y - pixelCenterNorm.y;
+            float pixelDist = diffX * diffX + diffY * diffY;
+            
+            // Skip if beyond the circle's radius
+            if (pixelDist > rad * rad)
+                continue;
+
+            if (cuConstRendererParams.sceneName == SNOWFLAKES || 
+                cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
+                const float kCircleMaxAlpha = .5f;
+                const float falloffScale = 4.f;
+
+                float normPixelDist = sqrt(pixelDist) / rad;
+                rgb = lookupColor(normPixelDist);
+
+                float maxAlpha = .6f + .4f * (1.f-p.z);
+                maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f);
+                alpha = maxAlpha * exp(-1.f * falloffScale * normPixelDist * normPixelDist);
+            } else {
+                rgb = *(float3*)&(cuConstRendererParams.color[index3]);
+                alpha = .5f;
+            }
+
+            float oneMinusAlpha = 1.f - alpha;
+
+            // Read current color
+            float4 existingColor = *imgPtr;
+            
+            // Blend new color with existing color
+            float4 newColor;
+            newColor.x = alpha * rgb.x + oneMinusAlpha * existingColor.x;
+            newColor.y = alpha * rgb.y + oneMinusAlpha * existingColor.y;
+            newColor.z = alpha * rgb.z + oneMinusAlpha * existingColor.z;
+            newColor.w = alpha + existingColor.w;
+            
+            // Write back to image
+            *imgPtr = newColor;
         }
     }
 }
@@ -633,13 +787,15 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
-void
-CudaRenderer::render() {
 
-    // 256 threads per block is a healthy number
-    dim3 blockDim(256, 1);
-    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+void CudaRenderer::render() {
+    // Use 2D grid of blocks for pixel-based parallelism
+    dim3 blockDim(16, 16); // 256 threads per block
+    // ceiling functions
+    dim3 gridDim(
+        (image->width + blockDim.x - 1) / blockDim.x,
+        (image->height + blockDim.y - 1) / blockDim.y);
 
-    kernelRenderCircles<<<gridDim, blockDim>>>();
+    kernelRenderPixels<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
 }

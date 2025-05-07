@@ -1,13 +1,13 @@
 #include <algorithm>
-
+#include <stdio.h>
 #include "circleRenderer.h"
 #include "cycleTimer.h"
 #include "image.h"
-#include "platformgl.h"
 
+#ifdef NO_OPENGL
+// No OpenGL version
 
 void renderPicture();
-
 
 static struct {
     int width;
@@ -18,7 +18,106 @@ static struct {
     double lastFrameTime;
 
     CircleRenderer* renderer;
+} gDisplay;
 
+// renderPicture --
+void renderPicture() {
+    double startTime = CycleTimer::currentSeconds();
+
+    // clear screen
+    gDisplay.renderer->clearImage();
+    double endClearTime = CycleTimer::currentSeconds();
+
+    // update particle positions and state
+    if (gDisplay.updateSim) {
+        gDisplay.renderer->advanceAnimation();
+    }
+    if (gDisplay.pauseSim)
+        gDisplay.updateSim = false;
+
+    double endSimTime = CycleTimer::currentSeconds();
+
+    // render the particles into the image
+    gDisplay.renderer->render();
+
+    double endRenderTime = CycleTimer::currentSeconds();
+
+    if (gDisplay.printStats) {
+        printf("Clear:    %.3f ms\n", 1000.f * (endClearTime - startTime));
+        printf("Advance:  %.3f ms\n", 1000.f * (endSimTime - endClearTime));
+        printf("Render:   %.3f ms\n", 1000.f * (endRenderTime - endSimTime));
+    }
+}
+
+// Save the rendered image to a PPM file
+void saveRenderedImage(const char* filename) {
+    const Image* img = gDisplay.renderer->getImage();
+    FILE* file = fopen(filename, "wb");
+    if (!file) {
+        fprintf(stderr, "Error opening file: %s\n", filename);
+        return;
+    }
+    
+    // Write PPM header
+    fprintf(file, "P6\n%d %d\n255\n", img->width, img->height);
+    
+    // Write image data
+    for (int i = 0; i < img->width * img->height; i++) {
+        unsigned char r = (unsigned char)(255.0f * img->data[4*i]);
+        unsigned char g = (unsigned char)(255.0f * img->data[4*i+1]);
+        unsigned char b = (unsigned char)(255.0f * img->data[4*i+2]);
+        fputc(r, file);
+        fputc(g, file);
+        fputc(b, file);
+    }
+    
+    fclose(file);
+    printf("Image saved to %s\n", filename);
+}
+
+void startRendererWithDisplay(CircleRenderer* renderer) {
+    // setup the display
+    const Image* img = renderer->getImage();
+
+    gDisplay.renderer = renderer;
+    gDisplay.updateSim = true;
+    gDisplay.pauseSim = false;
+    gDisplay.printStats = true;
+    gDisplay.lastFrameTime = CycleTimer::currentSeconds();
+    gDisplay.width = img->width;
+    gDisplay.height = img->height;
+
+    printf("Starting headless renderer\n");
+    
+    // Render a fixed number of frames
+    for (int i = 0; i < 20; i++) {
+        printf("Rendering frame %d\n", i+1);
+        renderPicture();
+        
+        // Save the last frame
+        if (i == 19) {
+            saveRenderedImage("output.ppm");
+        }
+        
+        gDisplay.lastFrameTime = CycleTimer::currentSeconds();
+    }
+}
+
+#else
+// Original OpenGL version (include your original display.cpp code here)
+#include "platformgl.h"
+
+void renderPicture();
+
+static struct {
+    int width;
+    int height;
+    bool updateSim;
+    bool printStats;
+    bool pauseSim;
+    double lastFrameTime;
+
+    CircleRenderer* renderer;
 } gDisplay;
 
 // handleReshape --
@@ -34,15 +133,12 @@ handleReshape(int w, int h) {
 
 void
 handleDisplay() {
-
     // simulation and rendering work is done in the renderPicture
     // function below
-
     renderPicture();
 
     // the subsequent code uses OpenGL to present the state of the
     // rendered image on the screen.
-
     const Image* img = gDisplay.renderer->getImage();
 
     int width = std::min(img->width, gDisplay.width);
@@ -79,13 +175,11 @@ handleDisplay() {
     glutPostRedisplay();
 }
 
-
 // handleKeyPress --
 //
 // Keyboard event handler
 void
 handleKeyPress(unsigned char key, int x, int y) {
-
     switch (key) {
     case 'q':
     case 'Q':
@@ -109,12 +203,10 @@ handleKeyPress(unsigned char key, int x, int y) {
 // At the reall work is done here, not in the display handler
 void
 renderPicture() {
-
     double startTime = CycleTimer::currentSeconds();
 
     // clear screen
     gDisplay.renderer->clearImage();
-
     double endClearTime = CycleTimer::currentSeconds();
 
     // update particle positions and state
@@ -140,9 +232,7 @@ renderPicture() {
 
 void
 startRendererWithDisplay(CircleRenderer* renderer) {
-
     // setup the display
-
     const Image* img = renderer->getImage();
 
     gDisplay.renderer = renderer;
@@ -154,7 +244,6 @@ startRendererWithDisplay(CircleRenderer* renderer) {
     gDisplay.height = img->height;
 
     // configure GLUT
-
     glutInitWindowSize(gDisplay.width, gDisplay.height);
     glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
     glutCreateWindow("CMU 15-418 Assignment 2 - Circle Renderer");
@@ -162,3 +251,4 @@ startRendererWithDisplay(CircleRenderer* renderer) {
     glutKeyboardFunc(handleKeyPress);
     glutMainLoop();
 }
+#endif

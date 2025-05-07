@@ -66,9 +66,9 @@ void saxpyCuda(int N, float alpha, float* xarray, float* yarray, float* resultar
     float* device_y = nullptr;
     float* device_result = nullptr;
 
-    cudaMalloc(&device_x, N*sizeof(float)); 
-    cudaMalloc(&device_y, N*sizeof(float));
-    cudaMalloc(&device_result, N*sizeof(float));
+    cudaHostAlloc(&device_x, N*sizeof(float), cudaHostAllocDefault); 
+    cudaHostAlloc(&device_y, N*sizeof(float), cudaHostAllocDefault);
+    cudaHostAlloc(&device_result, N*sizeof(float), cudaHostAllocDefault);
     
     //
     // CS149 TODO: allocate device memory buffers on the GPU using cudaMalloc.
@@ -111,9 +111,9 @@ void saxpyCuda(int N, float alpha, float* xarray, float* yarray, float* resultar
     printf("Effective BW by CUDA saxpy: %.3f ms\t\t[%.3f GB/s]\n", 1000.f * overallDuration, GBPerSec(totalBytes, overallDuration));
     printf("Kernel execution time: %.3f ms\t\t[%.3f GB/s]\n", 1000.f * kernel_dur, GBPerSec(totalBytes, kernel_dur));
 
-    cudaFree(device_x);
-    cudaFree(device_y);
-    cudaFree(device_result);
+    cudaFreeHost(device_x);
+    cudaFreeHost(device_y);
+    cudaFreeHost(device_result);
 }
 
 void printCudaInfo() {

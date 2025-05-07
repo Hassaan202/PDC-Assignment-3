@@ -8,7 +8,6 @@ import json
 import platform
 
 element_counts = ["1000000", "10000000", "20000000", "40000000"]
-
 perf_points = 1.25
 
 # Set up logs directories
@@ -32,25 +31,22 @@ print("\n--------------")
 print("Running tests:")
 print("--------------")
 
-
 def check_correctness(test, element_count):
-    correctness_cmd = f"./cudaScan -m {test} -i random -n {element_count} > ./logs/test/{test}_correctness_{element_count}.log"
+    cmd = f"./cudaScan -m {test} -i random -n {element_count} > ./logs/test/{test}_correctness_{element_count}.log"
     if os.environ.get("GRADING_TOKEN"):
-        result = subprocess.run(correctness_cmd, shell=True, user="nobody", env={})
+        result = subprocess.run(cmd, shell=True, user="nobody", env={})
     else:
-        result = subprocess.run(correctness_cmd, shell=True)
+        result = subprocess.run(cmd, shell=True)
     return result.returncode == 0
-
 
 def get_time(command):
     if os.environ.get("GRADING_TOKEN"):
-        result = subprocess.run(
-            command, shell=True, capture_output=True, user="nobody", env={}
-        )
+        result = subprocess.run(command, shell=True, capture_output=True, user="nobody", env={})
     else:
         result = subprocess.run(command, shell=True, capture_output=True)
-    time_match = re.search(r"\d+(\.\d+)?", result.stdout.decode())
-    return float(time_match.group()) if time_match else None
+    out = result.stdout.decode()
+    match = re.search(r"\d+(\.\d+)?", out)
+    return float(match.group()) if match else None
 
 
 def run_tests():
@@ -61,24 +57,25 @@ def run_tests():
     for element_count in element_counts:
         print(f"\nElement Count: {element_count}")
 
-        # Correctness check
+        # Check correctness
         correct[element_count] = check_correctness(test, element_count)
-        if correct[element_count]:
-            print("Correctness passed!")
-        else:
-            print("Correctness failed")
+        print("Correctness passed!" if correct[element_count] else "Correctness failed")
 
-        # Get student time
-        student_cmd = f"./cudaScan -m {test} -i random -n {element_count} | tee ./logs/test/{test}_time_{element_count}.log | grep 'Student GPU time:'"
+        # Student time
+        student_cmd = (
+            f"./cudaScan -m {test} -i random -n {element_count} | grep 'Student GPU time:'"
+        )
         your_times[element_count] = get_time(student_cmd)
         print(f"Student Time: {your_times[element_count]}")
 
+        # Reference binary selection
         ref_binary = (
             "cudaScan_ref_x86" if platform.machine() == "x86_64" else "cudaScan_ref"
         )
-
-        # Get reference time
-        ref_cmd = f"./{ref_binary} -m {test} -i random -n {element_count} | tee ./logs/ref/{test}_time_{element_count}.log | grep 'Student GPU time:'"
+        # Reference time
+        ref_cmd = (
+            f"./{ref_binary} -m {test} -i random -n {element_count} | grep 'Student GPU time:'"
+        )
         fast_times[element_count] = get_time(ref_cmd)
         print(f"Ref Time: {fast_times[element_count]}")
 
@@ -87,81 +84,60 @@ def run_tests():
 
 def calculate_scores(correct, your_times, fast_times):
     scores = []
-    total_score = 0
+    total_score = 0.0
 
     for element_count in element_counts:
-        ref_time = fast_times[element_count]
-        stu_time = your_times[element_count]
+        ref_time = fast_times.get(element_count)
+        stu_time = your_times.get(element_count)
 
-        if correct[element_count]:
+        if not correct.get(element_count, False):
+            score = 0.0
+        elif ref_time is None or stu_time is None:
+            print(f"Warning: Missing timing for element count {element_count}, assigning score 0.")
+            score = 0.0
+        else:
             if stu_time <= 1.20 * ref_time:
                 score = perf_points
             else:
                 score = perf_points * (ref_time / stu_time)
-        else:
-            score = 0
 
-        scores.append(
-            {
-                "element_count": element_count,
-                "correct": correct[element_count],
-                "ref_time": ref_time,
-                "stu_time": stu_time,
-                "score": score,
-            }
-        )
+        scores.append({
+            "element_count": element_count,
+            "correct": correct[element_count],
+            "ref_time": ref_time,
+            "stu_time": stu_time,
+            "score": score,
+        })
         total_score += score
 
-    max_total_score = perf_points * len(element_counts)
-    return scores, total_score, max_total_score
+    max_total = perf_points * len(element_counts)
+    return scores, total_score, max_total
 
 
-def print_score_table(scores, total_score, max_total_score):
+def print_score_table(scores, total, max_total):
     print("\n-------------------------")
     print(f"{test.capitalize()} Score Table:")
     print("-------------------------")
-
-    header = "| %-15s | %-15s | %-15s | %-15s |" % (
-        "Element Count",
-        "Ref Time",
-        "Student Time",
-        "Score",
-    )
-    dashes = "-" * len(header)
-    print(dashes)
+    header = f"| {'Element Count':<15} | {'Ref Time':<15} | {'Student Time':<15} | {'Score':<15} |"
+    print("-" * len(header))
     print(header)
-    print(dashes)
-
-    for score in scores:
-        element_count = score["element_count"]
-        ref_time = score["ref_time"]
-        stu_time = score["stu_time"]
-        score_value = score["score"]
-
-        if not score["correct"]:
-            stu_time = f"{stu_time} (F)"
-
-        print(
-            "| %-15s | %-15s | %-15s | %-15s |"
-            % (element_count, ref_time, stu_time, score_value)
-        )
-
-    print(dashes)
-    print(
-        "| %-33s | %-15s | %-15s |"
-        % ("", "Total score:", f"{total_score}/{max_total_score}")
-    )
-    print(dashes)
+    print("-" * len(header))
+    for s in scores:
+        elem = s['element_count']
+        rt = s['ref_time'] if s['ref_time'] is not None else 'N/A'
+        st = s['stu_time'] if s['stu_time'] is not None else 'N/A'
+        sc = s['score']
+        print(f"| {elem:<15} | {rt:<15} | {st:<15} | {sc:<15} |")
+    print("-" * len(header))
+    print(f"| {'':<33} | {'Total score:':<15} | {total}/{max_total:<15} |")
+    print("-" * len(header))
 
 
-# Run tests and calculate scores
+# Main execution
 correct, your_times, fast_times = run_tests()
 scores, total_score, max_total_score = calculate_scores(correct, your_times, fast_times)
 
-# Output based on mode
-GRADING_TOKEN = os.environ.get("GRADING_TOKEN")
-if not GRADING_TOKEN:
+if not os.environ.get("GRADING_TOKEN"):
     print_score_table(scores, total_score, max_total_score)
 else:
-    scores = json.dumps(scores)
-    print(f"{GRADING_TOKEN}{scores}")
+    print(os.environ.get("GRADING_TOKEN") + json.dumps(scores))
